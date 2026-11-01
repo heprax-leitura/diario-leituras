@@ -561,6 +561,11 @@ async function viaGoogle(isbn){
   return {titulo:v.title, subtitulo:v.subtitle, autores:(v.authors||[]).join("\n"), editora:v.publisher, ano:(v.publishedDate||"").slice(0,4),
           paginas:v.pageCount, resumo:v.description, idioma:IDIOMAS[v.language]};
 }
+async function viaBrasilAPI(isbn){
+  const v = await getJson("https://brasilapi.com.br/api/isbn/v1/"+isbn); if(!v || !v.title) return null;
+  const aut = Array.isArray(v.authors) ? v.authors.join("\n") : (v.authors||"");
+  return {titulo:v.title, subtitulo:v.subtitle, autores:aut, editora:v.publisher, ano:v.year?String(v.year):"", paginas:v.page_count, resumo:v.synopsis, local:v.location};
+}
 async function viaOpenLibrary(isbn){
   const j = await getJson("https://openlibrary.org/api/books?bibkeys=ISBN:"+isbn+"&format=json&jscmd=data");
   const v = j["ISBN:"+isbn]; if(!v) return null;
@@ -573,14 +578,16 @@ async function buscarIsbn(isbn){
   if(isbn.length!==10 && isbn.length!==13){ toast("O ISBN deve ter 10 ou 13 dígitos. Você digitou "+isbn.length+"."); return; }
   S.form.isbn = isbn; toast("Buscando dados do livro…");
   let d=null, falhas=[];
-  for(const [nome,fn] of [["Google Livros",viaGoogle],["Open Library",viaOpenLibrary]]){
+  const fontes = [["Open Library",viaOpenLibrary],["Google Livros",viaGoogle]];
+  if(/^(97885|97865)/.test(isbn) || isbn.length===10 && /^(85|65)/.test(isbn)) fontes.unshift(["BrasilAPI",viaBrasilAPI]);
+  for(const [nome,fn] of fontes){
     try{ const r = await fn(isbn); if(r && r.titulo){ d = Object.assign(d||{}, Object.fromEntries(Object.entries(r).filter(([k,v])=>v&&!(d&&d[k])))); } }
-    catch(e){ falhas.push(nome+": "+(e.name==="AbortError"?"demorou demais":e.message)); }
+    catch(e){ falhas.push(nome+": "+(e.name==="AbortError"?"demorou demais":(e.message==="HTTP 429"?"limite de consultas, tente em alguns minutos":e.message))); }
     if(d && d.titulo && d.editora && d.ano && d.autores) break;
   }
   if(!d){
     render();
-    toast(falhas.length ? "Falha na consulta ("+falhas.join("; ")+"). Verifique a internet ou preencha à mão." : "Este ISBN não foi encontrado nas bases. ISBN anotado — preencha o restante à mão.");
+    toast(falhas.length ? "Não encontrei este ISBN. Algumas fontes falharam ("+falhas.join("; ")+"). Tente de novo em instantes ou preencha à mão." : "Este ISBN não foi encontrado nas bases. ISBN anotado — preencha o restante à mão.");
     return;
   }
   const f = S.form;
