@@ -546,21 +546,47 @@ async function importarKindle(file){
 
 /* ============ ISBN / código de barras ============ */
 const isbnLimpo = s => String(s||"").replace(/[^0-9Xx]/g,"");
-async function buscarIsbn(isbn){
-  isbn = isbnLimpo(isbn); if(isbn.length<10){ toast("ISBN incompleto."); return; }
-  S.form.isbn = isbn; toast("Buscando dados do livro…");
+async function getJson(url){
+  const c = new AbortController(); const t = setTimeout(()=>c.abort(), 9000);
   try{
-    const r = await fetch("https://www.googleapis.com/books/v1/volumes?q=isbn:"+isbn); const j = await r.json();
-    const v = j.items && j.items[0] && j.items[0].volumeInfo;
-    if(!v) throw new Error("nao achou");
-    const f = S.form;
-    f.titulo = v.title||f.titulo; f.subtitulo = v.subtitle||f.subtitulo;
-    if(v.authors) f.autores = v.authors.join("\n");
-    f.editora = v.publisher||f.editora; f.ano = (v.publishedDate||"").slice(0,4)||f.ano;
-    f.paginas = v.pageCount||f.paginas; if(v.description && !f.resumo) f.resumo = v.description;
-    f.idioma = ({pt:"Português","pt-BR":"Português",en:"Inglês",es:"Espanhol",fr:"Francês"})[v.language]||f.idioma;
-    render(); toast("Dados preenchidos. Confira e complete (local e edição).");
-  }catch(e){ render(); toast("Não consegui buscar os dados. ISBN anotado — preencha o restante à mão."); }
+    const r = await fetch(url,{signal:c.signal});
+    if(!r.ok) throw new Error("HTTP "+r.status);
+    return await r.json();
+  } finally { clearTimeout(t); }
+}
+const IDIOMAS = {pt:"Português","pt-BR":"Português",por:"Português",en:"Inglês",eng:"Inglês",es:"Espanhol",spa:"Espanhol",fr:"Francês",fre:"Francês",de:"Alemão",ger:"Alemão",it:"Italiano",ita:"Italiano"};
+async function viaGoogle(isbn){
+  const j = await getJson("https://www.googleapis.com/books/v1/volumes?q=isbn:"+isbn);
+  const v = j.items && j.items[0] && j.items[0].volumeInfo; if(!v) return null;
+  return {titulo:v.title, subtitulo:v.subtitle, autores:(v.authors||[]).join("\n"), editora:v.publisher, ano:(v.publishedDate||"").slice(0,4),
+          paginas:v.pageCount, resumo:v.description, idioma:IDIOMAS[v.language]};
+}
+async function viaOpenLibrary(isbn){
+  const j = await getJson("https://openlibrary.org/api/books?bibkeys=ISBN:"+isbn+"&format=json&jscmd=data");
+  const v = j["ISBN:"+isbn]; if(!v) return null;
+  const ano = (/\d{4}/.exec(v.publish_date||"")||[])[0];
+  return {titulo:v.title, subtitulo:v.subtitle, autores:(v.authors||[]).map(a=>a.name).join("\n"), editora:(v.publishers||[]).map(p=>p.name).join(", "),
+          local:(v.publish_places||[]).map(p=>p.name).join(", "), ano, paginas:v.number_of_pages};
+}
+async function buscarIsbn(isbn){
+  isbn = isbnLimpo(isbn);
+  if(isbn.length!==10 && isbn.length!==13){ toast("O ISBN deve ter 10 ou 13 dígitos. Você digitou "+isbn.length+"."); return; }
+  S.form.isbn = isbn; toast("Buscando dados do livro…");
+  let d=null, falhas=[];
+  for(const [nome,fn] of [["Google Livros",viaGoogle],["Open Library",viaOpenLibrary]]){
+    try{ const r = await fn(isbn); if(r && r.titulo){ d = Object.assign(d||{}, Object.fromEntries(Object.entries(r).filter(([k,v])=>v&&!(d&&d[k])))); } }
+    catch(e){ falhas.push(nome+": "+(e.name==="AbortError"?"demorou demais":e.message)); }
+    if(d && d.titulo && d.editora && d.ano && d.autores) break;
+  }
+  if(!d){
+    render();
+    toast(falhas.length ? "Falha na consulta ("+falhas.join("; ")+"). Verifique a internet ou preencha à mão." : "Este ISBN não foi encontrado nas bases. ISBN anotado — preencha o restante à mão.");
+    return;
+  }
+  const f = S.form;
+  ["titulo","subtitulo","autores","editora","local","ano","paginas","idioma"].forEach(k=>{ if(d[k]) f[k]=String(d[k]); });
+  if(d.resumo && !f.resumo) f.resumo = d.resumo;
+  render(); toast("Dados preenchidos. Confira e complete o que faltar (local, edição).");
 }
 async function detectar(bitmap){
   if(!("BarcodeDetector" in window)) return null;
