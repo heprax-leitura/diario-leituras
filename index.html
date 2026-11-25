@@ -118,7 +118,7 @@ const hhmm = d => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 const fmtData = s => { if(!s) return ""; const m=/^(\d{4})-(\d{2})-(\d{2})/.exec(s); return m?`${m[3]}/${m[2]}/${m[1]}`:s; };
 const fmtMin = m => { m=Math.round(m||0); return m>=60 ? `${Math.floor(m/60)} h ${pad(m%60)} min` : `${m} min`; };
 const STATUS = ["Quero ler","Lendo","Lido","Abandonado"];
-function toast(msg){ const t=$("#toast"); t.textContent=msg; t.style.display="block"; clearTimeout(toast.t); toast.t=setTimeout(()=>t.style.display="none",3200); }
+function toast(msg,ms){ const t=$("#toast"); t.textContent=msg; t.style.display="block"; clearTimeout(toast.t); toast.t=setTimeout(()=>t.style.display="none",ms||3200); }
 
 /* ============ armazenamento (IndexedDB) ============ */
 const Store = {
@@ -154,7 +154,7 @@ function novoLivro(p={}){
     id:uid(), tipo:"Físico", status:"Quero ler", titulo:"", subtitulo:"", autores:"", edicao:"", local:"", editora:"", ano:"",
     paginas:"", isbn:"", idioma:"Português", capa:"", palavrasPagina:"",
     sobreAutor:"", personagens:"", trama:"", ideiaAutor:"", resumo:"", meuResumo:"", avaliacao:"",
-    paginaAtual:"", timerInicio:null, leituras:[], grifos:[], criado:Date.now()
+    paginaAtual:"", timer:null, leituras:[], grifos:[], criado:Date.now()
   }, p);
 }
 
@@ -213,6 +213,23 @@ function stats(b){
     wpm: min>0 && pags>0 && ppp ? Math.round(pags*ppp/min) : 0,
     pct: P && num(b.paginaAtual) ? Math.min(100, Math.round(num(b.paginaAtual)/P*100)) : (b.status==="Lido"?100:0)
   };
+}
+
+/* ============ cronômetro (com pausa) ============ */
+const T_MIN = 1577836800000; // 01/01/2020: qualquer instante anterior é inválido
+function timerMs(b){ const t=b.timer; if(!t) return 0; return (t.acum||0) + (t.est==="run" ? Math.max(0,Date.now()-t.inicio) : 0); }
+function fmtRelogio(ms){ const s=Math.max(0,Math.floor(ms/1000)); return `${pad(Math.floor(s/3600))}:${pad(Math.floor(s%3600/60))}:${pad(s%60)}`; }
+function migrar(b){
+  const r = {mudou:false, timer:0, sess:0};
+  if(b.timerInicio!==undefined){                       // formato antigo
+    const ti = Number(b.timerInicio);
+    if(ti){ if(ti>=T_MIN && ti<=Date.now()+60000 && !b.timer) b.timer={est:"run",origem:ti,inicio:ti,acum:0}; else r.timer++; }
+    delete b.timerInicio; r.mudou=true;
+  }
+  const t = b.timer;
+  if(t && (!(t.origem>=T_MIN) || t.origem>Date.now()+60000 || (t.est==="run" && !(t.inicio>=T_MIN)) || !(t.acum>=0))){ b.timer=null; r.timer++; r.mudou=true; }
+  b.leituras.forEach(l=>{ if(num(l.min)>10080){ l.min = minutosEntre(l.data,l.ini,l.fim) || 0; r.sess++; r.mudou=true; } });
+  return r;
 }
 
 /* ============ busca ============ */
@@ -284,7 +301,7 @@ function cardLivro(b){
   return `<div class="card book" data-open="${b.id}">${capaHTML(b)}<div class="info">
     <div class="t">${esc(b.titulo||"(sem título)")}</div>
     <div class="a">${esc(listaAutores(b).join(", "))}</div>
-    <span class="badge">${b.tipo}</span><span class="badge">${b.status}</span>${st.min?`<span class="badge">⏱ ${fmtMin(st.min)}</span>`:""}${b.grifos.length?`<span class="badge">✏️ ${b.grifos.length}</span>`:""}
+    <span class="badge">${b.tipo}</span><span class="badge">${b.status}</span>${b.timer?`<span class="badge">${b.timer.est==="run"?"▶ lendo agora":"⏸ em pausa"}</span>`:""}${st.min?`<span class="badge">⏱ ${fmtMin(st.min)}</span>`:""}${b.grifos.length?`<span class="badge">✏️ ${b.grifos.length}</span>`:""}
     ${(b.status==="Lendo"||st.pct)?`<div class="bar"><i style="width:${st.pct}%"></i></div><div class="small muted">${b.paginaAtual?`pág. ${esc(b.paginaAtual)}`:""}${b.paginas?` / ${esc(b.paginas)}`:""} · ${st.pct}%</div>`:""}
   </div></div>`;
 }
@@ -318,10 +335,13 @@ function vBook(){
       <div class="btnrow"><button class="btn sm" data-act="copiarVanc">Copiar citação</button></div>
       <p class="small muted">Gerada automaticamente dos dados bibliográficos. Até 6 autores; acima disso, usa “et al”.</p>`;
   }
-  const rodando = b.timerInicio;
-  const timer = rodando
-   ? `<div class="timer"><div class="small">Lendo desde ${hhmm(new Date(b.timerInicio))}</div><div class="clock" id="clock">00:00:00</div><button class="btn" data-act="pararLeitura">⏹ Parar e anotar</button></div>`
-   : `<button class="btn block" data-act="iniciarLeitura">▶ Iniciar leitura</button>`;
+  const t = b.timer; let timer;
+  if(!t) timer = `<button class="btn block" data-act="iniciarLeitura">▶ Iniciar leitura</button>`;
+  else { const run = t.est==="run";
+    timer = `<div class="timer"><div class="small">${run?`Lendo desde ${hhmm(new Date(t.origem))}`:`⏸ Em pausa · iniciada às ${hhmm(new Date(t.origem))}`}</div>
+      <div class="clock" id="clock">${fmtRelogio(timerMs(b))}</div>
+      <div class="btnrow" style="justify-content:center">${run?`<button class="btn" data-act="pausarLeitura">⏸ Pausar</button>`:`<button class="btn" data-act="continuarLeitura">▶ Continuar</button>`}<button class="btn" data-act="pararLeitura">⏹ Parar e anotar</button></div>
+      <button class="btn sm" style="margin-top:10px;background:transparent;color:inherit;border-color:rgba(255,255,255,.55)" data-act="descartarLeitura">Descartar esta leitura</button></div>`; }
   return `<header class="top"><div class="row"><button class="iconbtn" data-go="list">←</button><h1 style="font-size:18px">Livro</h1>
       <button class="iconbtn" data-act="editar" title="Editar">✏️</button><button class="iconbtn" data-act="imprimirLivro" title="Imprimir resenha">🖨️</button></div></header>
     <main><div class="book" style="cursor:default">${capaHTML(b,true)}<div class="info"><h2>${esc(b.titulo)}</h2>${b.subtitulo?`<div class="muted">${esc(b.subtitulo)}</div>`:""}
@@ -333,8 +353,8 @@ function vBook(){
       <div class="btnrow" style="margin-top:24px"><button class="btn danger sm" data-act="excluir">🗑 Excluir livro</button></div></main>`;
 }
 function iniciarRelogio(){
-  const b = getBook(S.id); if(!b||!b.timerInicio) return;
-  const tick = () => { const el=$("#clock"); if(!el) return; const s=Math.floor((Date.now()-b.timerInicio)/1000); el.textContent=`${pad(Math.floor(s/3600))}:${pad(Math.floor(s%3600/60))}:${pad(s%60)}`; };
+  const b = getBook(S.id); if(!b||!b.timer||b.timer.est!=="run") return;
+  const tick = () => { const el=$("#clock"); if(el) el.textContent = fmtRelogio(timerMs(b)); };
   tick(); S.timerTick = setInterval(tick,1000);
 }
 
@@ -633,7 +653,7 @@ function confirma(msg, ok){
   const m = modal(`<h2>Confirmar</h2><p>${esc(msg)}</p><div class="btnrow"><button class="btn danger" id="cOk">Sim</button><button class="btn ghost" id="cNo">Cancelar</button></div>`);
   $("#cOk",m).onclick = ()=>{ m.remove(); ok(); }; $("#cNo",m).onclick = ()=>m.remove();
 }
-function dlgSessao(b, l, ehNova){
+function dlgSessao(b, l, ehNova, doTimer){
   l = Object.assign({id:uid(),data:hoje(),ini:"",fim:"",min:0,pIni:"",pFim:"",resumo:"",reflexao:""}, l);
   const m = modal(`<h2>${ehNova?"Nova sessão de leitura":"Sessão de leitura"}</h2>
     <div class="grid3"><label class="f">Data<input type="date" id="sD" value="${l.data}"></label><label class="f">Início<input type="time" id="sI" value="${l.ini}"></label><label class="f">Fim<input type="time" id="sF" value="${l.fim}"></label></div>
@@ -645,23 +665,29 @@ function dlgSessao(b, l, ehNova){
   $("#sI",m).onchange = recalc; $("#sF",m).onchange = recalc;
   $("#sNo",m).onclick = ()=>m.remove();
   if(!ehNova) $("#sDel",m).onclick = ()=>{ m.remove(); confirma("Excluir esta sessão?", async()=>{ b.leituras = b.leituras.filter(x=>x.id!==l.id); await salvar(b); render(); }); };
+  let avisou = false;
   $("#sOk",m).onclick = async ()=>{
+    const mm = num($("#sM",m).value);
+    if(mm>960 && !avisou){ avisou=true; toast("Mais de 16 horas numa sessão? Confira os minutos. Toque em Salvar de novo para confirmar."); return; }
     Object.assign(l,{data:$("#sD",m).value,ini:$("#sI",m).value,fim:$("#sF",m).value,min:num($("#sM",m).value),pIni:$("#sPI",m).value,pFim:$("#sPF",m).value,resumo:$("#sR",m).value.trim(),reflexao:$("#sX",m).value.trim()});
     const i = b.leituras.findIndex(x=>x.id===l.id); if(i>=0) b.leituras[i]=l; else b.leituras.push(l);
     if(l.pFim) b.paginaAtual = l.pFim;
+    if(doTimer) b.timer = null;                      // só encerra o cronômetro ao salvar a sessão
     if(b.status==="Quero ler") b.status="Lendo";
     if(num(b.paginas) && num(b.paginaAtual)>=num(b.paginas)) b.status="Lido";
     await salvar(b); m.remove(); S.tab="leituras"; render(); toast("Sessão salva.");
   };
 }
-function pararLeitura(b){
-  const ini = new Date(b.timerInicio), fim = new Date();
-  const min = Math.max(1, Math.round((fim-ini)/60000));
+async function pararLeitura(b){
+  if(!b.timer){ render(); return; }
+  const t = b.timer;
+  if(t.est==="run"){ t.acum += Math.max(0,Date.now()-t.inicio); t.est="pause"; t.inicio=null; }
+  const ini = new Date(t.origem), fim = new Date();
+  const min = Math.max(1, Math.round(t.acum/60000));
   const ult = b.leituras.length ? [...b.leituras].sort((x,y)=>(y.data+y.ini).localeCompare(x.data+x.ini))[0] : null;
   const pIni = b.paginaAtual || (ult&&ult.pFim) || "";
-  b.timerInicio = null;
-  dlgSessao(b, {data:`${ini.getFullYear()}-${pad(ini.getMonth()+1)}-${pad(ini.getDate())}`, ini:hhmm(ini), fim:hhmm(fim), min, pIni}, true);
-  salvar(b);
+  await salvar(b); render();                         // fica em pausa até a sessão ser salva
+  dlgSessao(b, {data:`${ini.getFullYear()}-${pad(ini.getMonth()+1)}-${pad(ini.getDate())}`, ini:hhmm(ini), fim:hhmm(fim), min, pIni}, true, true);
 }
 
 /* ============ eventos ============ */
@@ -686,7 +712,10 @@ document.addEventListener("click", async e=>{
       S.form.criado = S.form.criado || Date.now();
       await salvar(S.form); toast("Livro salvo."); go("book", S.form.id, "resumo"); break;
     case "excluir": confirma(`Excluir “${b.titulo}” e todas as anotações? Isto não pode ser desfeito.`, async()=>{ await Store.del(b.id); S.books = S.books.filter(x=>x.id!==b.id); go("list",null); toast("Livro excluído."); }); break;
-    case "iniciarLeitura": b.timerInicio = Date.now(); if(b.status!=="Lendo") b.status="Lendo"; await salvar(b); render(); break;
+    case "iniciarLeitura": b.timer = {est:"run",origem:Date.now(),inicio:Date.now(),acum:0}; if(b.status!=="Lendo") b.status="Lendo"; await salvar(b); render(); break;
+    case "pausarLeitura": if(b.timer && b.timer.est==="run"){ b.timer.acum += Math.max(0,Date.now()-b.timer.inicio); b.timer.est="pause"; b.timer.inicio=null; await salvar(b); } render(); break;
+    case "continuarLeitura": if(b.timer && b.timer.est==="pause"){ b.timer.est="run"; b.timer.inicio=Date.now(); await salvar(b); } render(); break;
+    case "descartarLeitura": confirma("Descartar esta leitura em andamento? O tempo contado será perdido.", async()=>{ b.timer=null; await salvar(b); render(); }); break;
     case "pararLeitura": pararLeitura(b); break;
     case "sessaoManual": dlgSessao(b,{},true); break;
     case "editSessao": dlgSessao(b, b.leituras.find(l=>l.id===d.v), false); break;
@@ -712,7 +741,13 @@ document.addEventListener("click", async e=>{
 (async function init(){
   await Store.init();
   S.books = (await Store.all()).map(b=>Object.assign(novoLivro(),b));
+  const rel = {timer:0,sess:0};
+  for(const b of S.books){ const r = migrar(b); if(r.mudou) await Store.put(b); rel.timer+=r.timer; rel.sess+=r.sess; }
   render();
+  if(rel.timer||rel.sess){
+    const partes=[]; if(rel.timer) partes.push("zerei "+rel.timer+" cronômetro(s) com valor inválido"); if(rel.sess) partes.push("corrigi "+rel.sess+" sessão(ões) com tempo impossível — confira em Leituras");
+    toast("Reparo automático: "+partes.join("; ")+".",9000);
+  }
   try{ if("serviceWorker" in navigator && location.protocol.startsWith("http")) navigator.serviceWorker.register("sw.js").catch(()=>{}); }catch(e){}
 })();
 </script>
